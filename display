@@ -1,0 +1,218 @@
+import customtkinter as ctk
+import os
+import pandas as pd
+import win32com.client
+import threading
+from tkinter import filedialog, messagebox
+from datetime import datetime, timedelta
+from pandas.tseries.offsets import BusinessDay
+
+# -------------------------
+# FUNCTION DEFINITIONS
+# -------------------------
+def calculate_end_date(start_date, business_days=2):
+    """
+    Calculate end date by adding specified number of business days to start date
+    """
+    if isinstance(start_date, str):
+        try:
+            start_date = pd.to_datetime(start_date)
+        except:
+            return None
+    
+    if pd.isna(start_date):
+        return None
+        
+    end_date = start_date + BusinessDay(business_days)
+    # Format date as 'YYYY-MM-DD' without time
+    return end_date.strftime('%Y-%m-%d')
+
+def perform_mail_merge(excel_path, body_template, attachments, progress_callback):
+    """
+    Modified perform_mail_merge function with fixed subject format and automatic end date calculation
+    """
+    # 1) Read Excel
+    try:
+        df = pd.read_excel(excel_path)
+    except Exception as e:
+        raise RuntimeError(f"Failed to read Excel file: {e}")
+
+    # 2) Check for required columns
+    required_columns = ['Email', 'Class Name', 'Start Date']
+    missing_columns = [col for col in required_columns if col not in df.columns]
+    if missing_columns:
+        raise ValueError(f"Missing required columns: {', '.join(missing_columns)}")
+
+    # 3) Format Start Date and Calculate End Date
+    df['Start Date'] = pd.to_datetime(df['Start Date']).dt.strftime('%Y-%m-%d')
+    df['End Date'] = df['Start Date'].apply(lambda x: calculate_end_date(x, business_days=2))
+
+    # Optional: Check for 'CC' column
+    has_cc = 'CC' in df.columns
+
+    # 4) Set up Outlook
+    outlook = win32com.client.Dispatch('Outlook.Application')
+
+    # 5) Iterate through each row and create personalized emails
+    for index, row in df.iterrows():
+        row_data = dict(row)
+
+        # --- SET SUBJECT WITH FIXED FORMAT ---
+        subject = f"Re-review required: {row_data['Class Name']}"
+
+        # --- PERSONALIZED BODY ---
+        personalized_body = body_template
+        for col_name in df.columns:
+            placeholder = f"<<{col_name}>>"
+            if placeholder in personalized_body:
+                val = str(row_data[col_name]) if not pd.isnull(row_data[col_name]) else ""
+                personalized_body = personalized_body.replace(placeholder, val)
+
+        # --- CREATE OUTLOOK EMAIL ---
+        mail = outlook.CreateItem(0)  # 0 = olMailItem
+        mail.To = str(row_data['Email']) if 'Email' in row_data else ""
+
+        # Set CC if 'CC' column exists
+        if has_cc and not pd.isnull(row_data['CC']):
+            mail.CC = str(row_data['CC'])
+
+        mail.Subject = subject
+        mail.Body = personalized_body
+
+        # --- ATTACH FILES (if any) ---
+        for attach_file in attachments:
+            if os.path.exists(attach_file):
+                mail.Attachments.Add(attach_file)
+
+        # Opens the email in Outlook as a draft
+        mail.Display()
+
+        # Update the progress bar for each email created
+        progress_callback(index + 1)
+
+    return f"Created {len(df)} personalized draft(s) in Outlook."
+
+# -------------------------
+# GUI FUNCTIONS
+# -------------------------
+def on_attach_files():
+    """
+    Opens a file dialog to select multiple files to attach.
+    """
+    files = filedialog.askopenfilenames(
+        title="Select File(s) to Attach",
+        filetypes=[("All Files", "*.*")]
+    )
+    if files:
+        for f in files:
+            attached_files.append(f)
+        update_attachments_label()
+
+def update_attachments_label():
+    """
+    Updates the label to show which files have been attached.
+    """
+    if attached_files:
+        attachments_label.configure(text="\n".join(attached_files))
+    else:
+        attachments_label.configure(text="No attachments.")
+
+def on_browse_excel():
+    """
+    Opens a file dialog to select an Excel file for the mail merge.
+    """
+    path = filedialog.askopenfilename(
+        title="Select Excel File for Mail Merge",
+        filetypes=[("Excel Files", "*.xlsx;*.xls"), ("All Files", "*.*")]
+    )
+    if path:
+        excel_var.set(path)
+
+def on_run_mail_merge():
+    """
+    Validates user input and calls perform_mail_merge in a separate thread.
+    """
+    excel_path = excel_var.get().strip()
+    body_template = body_textbox.get("1.0", "end").strip()
+
+    # Validate fields
+    if not excel_path or not body_template:
+        messagebox.showerror("Error", "Please fill in Excel path and Body template.")
+        return
+
+    # Define a callback to update the progress bar
+    def progress_callback(value):
+        progress_bar.set(value)
+
+    # Define the mail merge process
+    def run_merge():
+        try:
+            result_message = perform_mail_merge(excel_path, body_template, attached_files, progress_callback)
+            messagebox.showinfo("Success", result_message)
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    # Run the mail merge in a background thread
+    threading.Thread(target=run_merge, daemon=True).start()
+
+# -------------------------
+# MAIN GUI SETUP
+# -------------------------
+ctk.set_appearance_mode("System")
+ctk.set_default_color_theme("blue")
+
+root = ctk.CTk()
+root.title("Mail Merge")
+root.geometry("700x600")
+
+# HEADER
+header_label = ctk.CTkLabel(root, text="Mail Merge Tool", font=("Calibri", 24, "bold"))
+header_label.pack(pady=20)
+
+# EXCEL FILE PATH FRAME
+excel_frame = ctk.CTkFrame(root, corner_radius=10)
+excel_frame.pack(pady=10, fill="x", padx=20)
+
+excel_label = ctk.CTkLabel(excel_frame, text="Excel File Path:")
+excel_label.pack(side="left", padx=10)
+
+excel_var = ctk.StringVar()
+excel_entry = ctk.CTkEntry(excel_frame, textvariable=excel_var, width=400)
+excel_entry.pack(side="left", padx=10)
+
+excel_browse = ctk.CTkButton(excel_frame, text="Browse", command=on_browse_excel)
+excel_browse.pack(side="right", padx=10)
+
+# BODY TEMPLATE FRAME
+body_frame = ctk.CTkFrame(root, corner_radius=10)
+body_frame.pack(pady=10, fill="both", padx=20, expand=True)
+
+body_label = ctk.CTkLabel(body_frame, text="Body (with placeholders):")
+body_label.pack(anchor="w", padx=10, pady=5)
+
+body_textbox = ctk.CTkTextbox(body_frame, wrap="word", height=200)
+body_textbox.pack(padx=10, pady=5, fill="both", expand=True)
+
+# ATTACHMENTS FRAME
+attachments_frame = ctk.CTkFrame(root, corner_radius=10)
+attachments_frame.pack(pady=10, fill="x", padx=20)
+
+attachments_button = ctk.CTkButton(attachments_frame, text="Attach Files", command=on_attach_files)
+attachments_button.pack(side="left", padx=10)
+
+attachments_label = ctk.CTkLabel(attachments_frame, text="No attachments.", anchor="w")
+attachments_label.pack(side="left", padx=10)
+
+# PROGRESS BAR
+progress_bar = ctk.CTkProgressBar(root)
+progress_bar.pack(pady=10, padx=20, fill="x")
+
+# RUN BUTTON
+run_button = ctk.CTkButton(root, text="Run Mail Merge", command=on_run_mail_merge)
+run_button.pack(pady=20)
+
+# LIST TO HOLD ATTACHMENTS
+attached_files = []
+
+# START THE MAIN LOOP
+root.mainloop()
